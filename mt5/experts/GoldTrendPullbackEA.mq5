@@ -1,23 +1,26 @@
 //+------------------------------------------------------------------+
 //|                                        GoldTrendPullbackEA.mq5   |
-//|  v0.1 - Base EA for XAUUSD. Demo-locked by default.              |
+//|  v0.2 - Base EA for XAUUSD. Demo-locked by default.              |
 //|                                                                  |
-//|  Strategy: trend-pullback                                        |
+//|  Strategy: trend-pullback (PLACEHOLDER; replaced in Phase 2)     |
 //|   - Trend filter : EMA(fast) vs EMA(slow) + price vs slow EMA    |
 //|   - Entry        : RSI crosses back through a level (pullback    |
-//|                    ended), evaluated on the CLOSED bar only     |
-//|   - Filters      : ATR minimum, max spread, session, Friday      |
+//|                    ended), evaluated on the CLOSED bar only      |
+//|   - Filters      : ATR minimum, session, Friday                  |
 //|   - Exits        : ATR-based SL/TP, optional time stop           |
-//|   - Risk         : % of balance per trade, daily loss cap,       |
-//|                    consecutive-loss stop, max trades per day     |
+//|                                                                  |
+//|  Risk: delegated to risk/RiskLayer.mqh. This EA no longer        |
+//|  contains sizing or cap rules. It only supplies context and      |
+//|  executes the approved decision.                                 |
 //|                                                                  |
 //|  NOT financial advice. No profitability is claimed or implied.   |
 //+------------------------------------------------------------------+
 #property copyright "Gold bot project"
-#property version   "0.10"
+#property version   "1.00"
 #property strict
 
 #include <Trade/Trade.mqh>
+#include "risk/RiskAdapter.mqh"
 
 //--- inputs --------------------------------------------------------
 input group "=== Safety ==="
@@ -45,21 +48,24 @@ input int              InpEndHour         = 20;     // Session end   (SERVER tim
 input int              InpFridayCutoffHour= 18;     // No new trades on Friday from this hour
 
 input group "=== Risk ==="
-input double           InpRiskPct         = 0.5;    // Risk per trade, % of balance
+input bool             InpRiskOnEquity    = true;   // Size and cap from equity (recommended)
+input double           InpRiskPct         = 0.5;    // Risk per trade, % of base
 input double           InpMaxLots         = 1.0;    // Hard cap on lot size
 input double           InpMaxDailyLossPct = 2.0;    // Stop for the day at this % loss
 input int              InpMaxConsecLosses = 3;      // Stop for the day after N losses in a row
 input int              InpMaxTradesPerDay = 5;      // Max new entries per server day
+input double           InpMaxMarginUsagePct = 80.0; // Max % of free margin used by one order
 input int              InpDeviationPts    = 30;     // Max slippage in points
 
 //--- globals -------------------------------------------------------
-CTrade   trade;
-int      hFast = INVALID_HANDLE;
-int      hSlow = INVALID_HANDLE;
-int      hRsi  = INVALID_HANDLE;
-int      hAtr  = INVALID_HANDLE;
-datetime g_lastBar = 0;
-string   g_status  = "";
+CTrade     trade;
+RiskLimits g_risk;
+int        hFast = INVALID_HANDLE;
+int        hSlow = INVALID_HANDLE;
+int        hRsi  = INVALID_HANDLE;
+int        hAtr  = INVALID_HANDLE;
+datetime   g_lastBar = 0;
+string     g_status  = "";
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -82,6 +88,26 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   if(InpStartHour < 0 || InpStartHour > 23 ||
+      InpEndHour < 1 || InpEndHour > 24 || InpStartHour >= InpEndHour)
+   {
+      Print("GoldTPB: invalid session hours.");
+      return INIT_PARAMETERS_INCORRECT;
+   }
+
+   // Copy inputs into the fixed risk config.
+   RiskLimitsInit(g_risk);
+   g_risk.demoOnly             = InpDemoOnly;
+   g_risk.useEquity            = InpRiskOnEquity;
+   g_risk.riskPctPerTrade      = InpRiskPct;
+   g_risk.maxLots              = InpMaxLots;
+   g_risk.maxDailyLossPct      = InpMaxDailyLossPct;
+   g_risk.maxConsecutiveLosses = InpMaxConsecLosses;
+   g_risk.maxTradesPerDay      = InpMaxTradesPerDay;
+   g_risk.maxSpreadPrice       = InpMaxSpread;
+   g_risk.onePositionAtATime   = true;
+   g_risk.maxMarginUsagePct    = InpMaxMarginUsagePct;
+
    hFast = iMA(_Symbol, InpTF, InpEmaFast, 0, MODE_EMA, PRICE_CLOSE);
    hSlow = iMA(_Symbol, InpTF, InpEmaSlow, 0, MODE_EMA, PRICE_CLOSE);
    hRsi  = iRSI(_Symbol, InpTF, InpRsiPeriod, PRICE_CLOSE);
@@ -98,8 +124,9 @@ int OnInit()
    trade.SetDeviationInPoints(InpDeviationPts);
    trade.SetTypeFillingBySymbol(_Symbol);
 
-   PrintFormat("GoldTPB v0.1 started on %s %s | digits=%d point=%g | risk=%.2f%%",
-               _Symbol, EnumToString(InpTF), _Digits, _Point, InpRiskPct);
+   PrintFormat("GoldTPB v0.2 started on %s %s | digits=%d point=%g | risk=%.2f%% on %s",
+               _Symbol, EnumToString(InpTF), _Digits, _Point, InpRiskPct,
+               (InpRiskOnEquity ? "equity" : "balance"));
    return INIT_SUCCEEDED;
 }
 
@@ -119,11 +146,11 @@ void OnTick()
    // Everything runs once per new bar; signals use the last CLOSED bar.
    if(!IsNewBar()) return;
 
-   // 1) Manage any open position (time stop)
+   // 1) Manage any open position (time stop). Execution, not risk.
    ulong    ticket;
    long     ptype;
    datetime popen;
-   if(GetOwnPosition(ticket, ptype, popen))
+   if(RiskAdapterOwnPosition(ticket, ptype, popen, _Symbol, InpMagic))
    {
       if(InpMaxBarsInTrade > 0)
       {
@@ -141,22 +168,7 @@ void OnTick()
       return;
    }
 
-   // 2) Daily risk gates
-   double realized; int entries; int consecLosses;
-   GetDayStats(realized, entries, consecLosses);
-
-   double dayStartBal = AccountInfoDouble(ACCOUNT_BALANCE) - realized;
-   double dayPnL      = realized + OwnFloatingPnL();
-   if(dayStartBal > 0 && dayPnL <= -(InpMaxDailyLossPct / 100.0) * dayStartBal)
-   { SetStatus(StringFormat("HALT: daily loss cap hit (%.2f)", dayPnL)); return; }
-
-   if(consecLosses >= InpMaxConsecLosses)
-   { SetStatus(StringFormat("HALT: %d consecutive losses today", consecLosses)); return; }
-
-   if(entries >= InpMaxTradesPerDay)
-   { SetStatus("HALT: max trades per day reached"); return; }
-
-   // 3) Time / session filters (server time)
+   // 2) Time / session filters (strategy; TODO Phase 2: move to UTC).
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(), dt);
    if(dt.hour < InpStartHour || dt.hour >= InpEndHour)
@@ -166,20 +178,32 @@ void OnTick()
    if(dt.day_of_week == 0 || dt.day_of_week == 6)
    { SetStatus("Weekend"); return; }
 
-   // 4) Spread filter (price units)
-   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   if(ask <= 0 || bid <= 0) { SetStatus("No quote"); return; }
-   if((ask - bid) > InpMaxSpread)
-   { SetStatus(StringFormat("Spread too wide (%.2f)", ask - bid)); return; }
-
-   // 5) Signal
+   // 3) Signal.
    double atr;
    int dir = GetSignal(atr);
    if(dir == 0) { SetStatus("No signal"); return; }
 
-   // 6) Execute
-   OpenTrade(dir, atr);
+   // 4) Risk decision.
+   double stopDist = InpSlAtrMult * atr;
+   RiskContext ctx;
+   RiskAdapterBuildContext(ctx, InpMagic, _Symbol, dir, 0.0);
+
+   RiskOrder order;
+   RiskOrderInit(order);
+   order.direction         = dir;
+   order.stopDistancePrice = stopDist;
+   order.entryPrice        = (dir > 0) ? ctx.ask : ctx.bid;
+
+   RiskDecision decision;
+   RiskEvaluate(g_risk, ctx, order, decision);
+   if(decision.action == RISK_ACTION_REJECT)
+   {
+      SetStatus(StringFormat("RISK %s: %s", RiskCodeToString(decision.code), decision.reason));
+      return;
+   }
+
+   // 5) Execute.
+   OpenTrade(dir, atr, decision.lots, stopDist);
 }
 
 //+------------------------------------------------------------------+
@@ -217,34 +241,24 @@ int GetSignal(double &atr)
 }
 
 //+------------------------------------------------------------------+
-void OpenTrade(int dir, double atr)
+void OpenTrade(int dir, double atr, double lots, double slDist)
 {
+   if(lots <= 0.0) { SetStatus("Invalid lots - skipped"); return; }
+
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    double price = (dir > 0) ? ask : bid;
-
-   double slDist = InpSlAtrMult * atr;
    double tpDist = InpTpAtrMult * atr;
 
-   // Respect broker minimum stop distance
+   // TP is strategy, so the risk layer has not checked its broker distance.
    double minDist = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * _Point;
-   if(slDist <= minDist || tpDist <= minDist)
-   { SetStatus("SL/TP inside broker stop level - skipped"); return; }
+   if(tpDist <= minDist)
+   { SetStatus("TP inside broker stop level - skipped"); return; }
 
    double sl = (dir > 0) ? price - slDist : price + slDist;
    double tp = (dir > 0) ? price + tpDist : price - tpDist;
    sl = NormalizeDouble(sl, _Digits);
    tp = NormalizeDouble(tp, _Digits);
-
-   double lots = CalcLots(slDist);
-   if(lots <= 0) { SetStatus("Lot size invalid / below minimum - skipped"); return; }
-
-   // Margin check
-   double margin = 0.0;
-   ENUM_ORDER_TYPE otype = (dir > 0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   if(!OrderCalcMargin(otype, _Symbol, lots, price, margin) ||
-      margin > AccountInfoDouble(ACCOUNT_MARGIN_FREE) * 0.8)
-   { SetStatus("Not enough free margin - skipped"); return; }
 
    bool ok = (dir > 0) ? trade.Buy(lots, _Symbol, price, sl, tp, InpComment)
                        : trade.Sell(lots, _Symbol, price, sl, tp, InpComment);
@@ -256,39 +270,6 @@ void OpenTrade(int dir, double atr)
                trade.ResultRetcode(), trade.ResultRetcodeDescription());
 
    SetStatus(ok ? "Order sent" : "Order FAILED - see Experts log");
-}
-
-//+------------------------------------------------------------------+
-//| Lot size so that hitting the stop loses InpRiskPct of balance.   |
-//+------------------------------------------------------------------+
-double CalcLots(double slDist)
-{
-   double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   if(tickSize <= 0 || tickValue <= 0 || slDist <= 0) return 0.0;
-
-   double riskMoney = AccountInfoDouble(ACCOUNT_BALANCE) * InpRiskPct / 100.0;
-   double lossPerLot = (slDist / tickSize) * tickValue;
-   if(lossPerLot <= 0) return 0.0;
-
-   double lots   = riskMoney / lossPerLot;
-   double step   = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-   double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   if(step <= 0) return 0.0;
-
-   lots = MathFloor(lots / step + 1e-9) * step;
-
-   if(lots < minLot)
-   {
-      PrintFormat("GoldTPB: computed lots %.4f below broker minimum %.2f - trade skipped "
-                  "(risk too small for this balance/stop).", lots, minLot);
-      return 0.0;
-   }
-
-   lots = MathMin(lots, MathMin(maxLot, InpMaxLots));
-   int d = (int)MathMax(0.0, MathRound(-MathLog10(step)));
-   return NormalizeDouble(lots, d);
 }
 
 //+------------------------------------------------------------------+
@@ -305,90 +286,11 @@ bool IsNewBar()
 }
 
 //+------------------------------------------------------------------+
-bool GetOwnPosition(ulong &ticket, long &type, datetime &openTime)
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong t = PositionGetTicket(i);
-      if(t == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      ticket   = t;
-      type     = PositionGetInteger(POSITION_TYPE);
-      openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      return true;
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-double OwnFloatingPnL()
-{
-   double sum = 0.0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong t = PositionGetTicket(i);
-      if(t == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
-      if(PositionGetInteger(POSITION_MAGIC) != InpMagic) continue;
-      sum += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-   }
-   return sum;
-}
-
-//+------------------------------------------------------------------+
-//| Today's (server day) realized P&L, entries, and loss streak.    |
-//+------------------------------------------------------------------+
-void GetDayStats(double &realized, int &entries, int &consecLosses)
-{
-   realized = 0.0; entries = 0; consecLosses = 0;
-
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   dt.hour = 0; dt.min = 0; dt.sec = 0;
-   datetime dayStart = StructToTime(dt);
-
-   if(!HistorySelect(dayStart, TimeCurrent() + 60)) return;
-
-   int  total = HistoryDealsTotal();
-   bool streakBroken = false;
-
-   for(int i = total - 1; i >= 0; i--)   // newest first so the streak is "most recent"
-   {
-      ulong tk = HistoryDealGetTicket(i);
-      if(tk == 0) continue;
-      if(HistoryDealGetString(tk, DEAL_SYMBOL) != _Symbol) continue;
-      if(HistoryDealGetInteger(tk, DEAL_MAGIC) != InpMagic) continue;
-
-      long   entry = HistoryDealGetInteger(tk, DEAL_ENTRY);
-      double comm  = HistoryDealGetDouble(tk, DEAL_COMMISSION) + HistoryDealGetDouble(tk, DEAL_FEE);
-
-      if(entry == DEAL_ENTRY_IN)
-      {
-         entries++;
-         realized += comm;
-      }
-      else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
-      {
-         double p = HistoryDealGetDouble(tk, DEAL_PROFIT)
-                  + HistoryDealGetDouble(tk, DEAL_SWAP) + comm;
-         realized += p;
-         if(!streakBroken)
-         {
-            if(p < 0) consecLosses++;
-            else      streakBroken = true;
-         }
-      }
-   }
-}
-
-//+------------------------------------------------------------------+
 void SetStatus(const string s)
 {
    g_status = s;
-   Comment("GoldTrendPullbackEA v0.1\n",
+   Comment("GoldTrendPullbackEA v0.2\n",
            "Symbol: ", _Symbol, "  TF: ", EnumToString(InpTF), "\n",
            "Status: ", g_status, "\n",
            "Server time: ", TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES));
 }
-//+------------------------------------------------------------------+

@@ -5,7 +5,7 @@ prerequisite for Phases 4–5. Fill in every field; "TBD" is a blocker, not a va
 
 ## MT5 runtime
 
-- Hosting: TBD (Windows VM / Windows VPS / other)
+- Hosting: macOS workstation (running now). Method (Wine / CrossOver / VM): TBD
 - OS version: TBD
 - MT5 terminal build: TBD
 - Broker server: TBD
@@ -15,10 +15,24 @@ prerequisite for Phases 4–5. Fill in every field; "TBD" is a blocker, not a va
 
 ## Build and test
 
-- How MQL5 source gets to the terminal: TBD (shared folder / repo clone on Windows / manual copy)
+- How MQL5 source gets into the terminal: repo `mt5/experts/` mirrors `MQL5/Experts/`; copy preserving the `risk/` folder
 - Compiler: MetaEditor version TBD
 - Strategy Tester: real ticks available? TBD
 - Tick history depth available: TBD
+
+## Source layout
+
+The EA includes `"risk/RiskAdapter.mqh"` relative to its own folder. Keep the
+`risk/` subfolder next to `GoldTrendPullbackEA.mq5` when copying into MT5.
+
+## Build check performed (2026-11-24)
+
+- Tool: bundled Wine + `metaeditor64.exe` from `/Applications/MetaTrader 5.app`
+- `mt5/experts/risk/RiskLayerTests.mq5`: **0 errors, 0 warnings**
+- `mt5/experts/GoldTrendPullbackEA.mq5`: **0 errors, 0 warnings**
+- Compiled test EA staged in the terminal at `MQL5/Experts/_agent_build/risk/RiskLayerTests.ex5`
+- Runtime tests still to run: attach `RiskLayerTests` to any chart and read the
+  Experts log for `RISK TESTS PASSED` (it places no orders and unloads itself).
 
 ## Transfer path
 

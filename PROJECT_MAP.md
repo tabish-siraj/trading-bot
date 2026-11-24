@@ -25,10 +25,10 @@ A systematic trading system for MetaTrader 5 (MT5) that:
 | Item | Value |
 |---|---|
 | Platform | MetaTrader 5 |
-| MT5 runtime | Windows VM or Windows VPS. MT5 is Windows-native; the dev machine is macOS, so the EA, Strategy Tester and demo terminal all live on Windows. Record the exact environment in `docs/runtime.md`. |
-| Dev workstation | macOS, for Python research and editing. Code that must run inside MT5 is transferred to the Windows runtime. |
+| MT5 runtime | MT5 is currently running on the macOS workstation (method to confirm: Wine / CrossOver / VM). Compilation, Strategy Tester and the demo terminal happen there. Record build and method in `docs/runtime.md`. |
+| Dev workstation | macOS: Python research, editing, and the MT5 runtime. A Windows VPS is added at Phase 5. |
 | Broker / account | Exness, **demo only** until explicitly promoted (see Section 5). Account type (raw-spread vs standard) must be pinned and recorded before any cost modelling. |
-| Hosting | Windows runtime now, VPS later (Phase 5 onward) |
+| Hosting | macOS workstation now, Windows VPS later (Phase 5 onward) |
 | Research language | Python (pandas, numpy, scikit-learn; LightGBM/XGBoost optional; ONNX only if the Phase 3 export constraint allows it) |
 | Execution language | MQL5 Expert Advisor (EA) |
 | First instrument | XAUUSD |
@@ -116,10 +116,12 @@ Phase 0b (repo + walking skeleton) and Phase 1.5 (statistical power check) were 
 
 **Gate:** the skeleton places and logs at least one demo order, the risk module has passing tests, and the risk-layer source is committed.
 
-**Captured EA — known issues to fix before/at Phase 2**
-- Session and server-day boundaries use **server time** (`TimeCurrent`, `dt.hour`), not UTC. This is the DST trap the plan warns about; it must move to UTC before any session strategy.
-- Position sizing and the daily loss cap use **account balance**, not equity. Switch deliberately and document the choice.
-- If computed lots fall below the broker minimum, the trade is **skipped** rather than rounded up to min lot. Keep or change deliberately; either way, document it.
+**Captured EA — status and known issues (as of v0.2)**
+- Risk rules now live in `mt5/experts/risk/RiskLayer.mqh`; the EA only builds context and executes. Do not add sizing or cap logic back into the EA.
+- `mt5/experts/risk/RiskLayerTests.mq5` must pass before the demo-order skeleton step.
+- Session and server-day boundaries still use **server time** (`TimeCurrent`, `dt.hour`), not UTC. This is the DST trap the plan warns about; it must move to UTC before any session strategy.
+- Position sizing and caps are **equity-based by default** (`InpRiskOnEquity`), with balance as an explicit alternative; confirm on demo.
+- Below-minimum-lot trades are **rejected** (`RISK_CODE_BELOW_MIN_LOT`), not rounded up. Intentional and documented; revisit if the demo balance is too small for the chosen stop.
 - `InpMinAtr` is a hardcoded price-unit threshold for gold. Replace with a regime-normalised measure in Phase 2.
 - The spread cap is a single global value. Phase 2 needs a spread-by-hour table.
 - The signal is **trend-pullback**, a placeholder. Only the risk layer carries into Phase 2, whose primary candidate is session breakout.
@@ -197,7 +199,7 @@ Phase 0b (repo + walking skeleton) and Phase 1.5 (statistical power check) were 
 
 **Rationale for the broad population:** ~250 candidates/year leaves Phase 3 underpowered (see Phase 1.5). Multiple sessions and retests multiply the learning signal without pretending the edge is stronger.
 
-**Optional second candidate (at most one):** a momentum or trend-following variant. If two candidates are compared, **both count as trials** and are judged against the same pre-registered criteria.
+**Second candidate (included):** one momentum or trend-following variant. Both candidates count as separate trials and are judged against the same pre-registered criteria. If the momentum variant is hopeless after costs, it is dropped and session breakout continues alone.
 
 **Expectation to hold honestly:** the Asian-range breakout on gold is widely known. The plain version may be marginal after costs. Finding that out cheaply is the point of this phase.
 
@@ -480,10 +482,10 @@ project/
 | Phase | Status | Gate passed? | Date | Notes |
 |---|---|---|---|---|
 | 0 Foundation | Done | Yes | | Risk layer written; signal logic placeholder; artifacts captured in repo (Phase 0b) |
-| 0b Repo + walking skeleton | In progress | No | 2026-11-24 | Repo, structure and EA captured; risk-module refactor + demo skeleton pending |
+| 0b Repo + walking skeleton | In progress | No | 2026-11-24 | Repo, EA, risk module + tests; compiles 0/0; runtime tests + demo order pending |
 | 1 Data | Not started | No | | Holdout split + DST mismatch test now mandatory |
 | 1.5 Statistical power check | Not started | No | | Gates the ML layer; MDE vs required effect |
-| 2 Base strategy | Not started | No | | Broad session-breakout candidate population decided |
+| 2 Base strategy | Not started | No | | Broad session-breakout + momentum candidate; both count as trials |
 | 3 ML meta-filter | Not started | No | | Rules baseline first; ML must beat it |
 | 4 Port to MT5 | Not started | No | | Indicator conformance suite first |
 | 5 Tester + demo | Not started | No | | |
@@ -493,7 +495,7 @@ project/
 | 9 Multi-asset | Not started | No | | |
 
 **Current phase:** 0b (Repo and walking skeleton)
-**Next action:** on the Windows runtime, refactor the risk layer into `mt5/experts/risk/` with tests, then place one demo order through the skeleton and verify the structured log. Fill in `docs/runtime.md`.
+**Next action:** attach `RiskLayerTests` to any chart in the running MT5 and confirm `RISK TESTS PASSED` in the Experts log; then place one demo order through the EA/skeleton and verify the structured log.
 
 ---
 
@@ -519,11 +521,14 @@ project/
 | 2026-11-24 | ONNX only if linear export fails and parity cost is accepted | ONNX in MT5 adds a large class of parity bugs |
 | 2026-11-24 | Captured Phase 0 EA at `mt5/experts/GoldTrendPullbackEA.mq5`; fixed the `.mlq5` extension | MT5 requires `.mq5`; repo was otherwise empty |
 | 2026-11-24 | The captured EA's trend-pullback signal is a placeholder; only the risk layer carries into Phase 2 | Phase 2 primary candidate is session breakout |
+| 2026-11-24 | Phase 2 includes the momentum/trend-following candidate; both candidates count as trials | User decision; broadens the search cheaply |
+| 2026-11-24 | Risk rules extracted to `mt5/experts/risk/RiskLayer.mqh` (pure) + `RiskAdapter.mqh` (state) + test EA | Makes the fixed risk layer testable in isolation and hard to edit by accident |
+| 2026-11-24 | Sizing and caps are equity-based by default (`InpRiskOnEquity`) | Equity reflects live drawdown; balance can hide it |
+| 2026-11-24 | MT5 runs on the macOS workstation for now; VPS later | User confirmed; record method/build in `docs/runtime.md` |
 
 **Open decisions**
-- Whether to also test the optional momentum candidate in Phase 2 (if yes, both count as trials).
 - Pre-registered numeric thresholds for Phases 1, 1.5, 2 and 3 (to be set with the user before running).
-- Where MT5 actually runs (Windows VM vs VPS) and which MT5 build to pin.
+- Exact MT5-on-macOS method and build to pin in `docs/runtime.md`.
 
 ---
 
