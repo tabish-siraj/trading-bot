@@ -1,0 +1,3 @@
+# Append-only holdout access log.
+# Written only by scripts/holdout_eval.py. One line per read.
+# Format: <utc_iso8601> | <author/process> | <reason> | <range> | <commit>

@@ -1,0 +1,36 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Data bodies stay out of git; commit hashes/manifests instead.
+data/raw/*
+data/clean/*
+data/holdout/*
+!data/raw/.gitkeep
+!data/clean/.gitkeep
+!data/holdout/.gitkeep
+
+# MT5 build artifacts
+mt5/**/*.ex5
+mt5/**/*.mq5.bak
+
+# Model binaries: commit metadata, ignore large artifacts unless explicitly versioned.
+models/**/*.pkl
+models/**/*.joblib
+models/**/*.onnx
+models/**/*.bin
+
+# Runtime logs; the append-only holdout access log IS committed.
+logs/*.log
+!logs/holdout_access.log
+
+*.tmp

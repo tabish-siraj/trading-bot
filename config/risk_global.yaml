@@ -1,0 +1,34 @@
+# Fixed risk layer configuration.
+#
+# NOT writable by any ML/retraining component. The EA verifies a hash of this
+# file at startup and refuses to run on mismatch (Phase 7).
+#
+# Seeded from GoldTrendPullbackEA v0.1 inputs. Values are PROVISIONAL until
+# verified on the live demo account and against MT5 Market Watch.
+#
+# Status: Phase 0b capture. Do not treat as final.
+
+version: 1
+verified_against_mt5_build: "TBD"
+source: "GoldTrendPullbackEA v0.1 inputs"
+
+safety:
+  demo_only: true
+  magic: 26112401
+  order_comment: "GoldTPB"
+
+# Per-trade sizing and account-level caps.
+risk:
+  risk_pct_per_trade: 0.5      # % of balance
+  max_lots: 1.0                # hard lot cap
+  max_daily_loss_pct: 2.0      # halt for the day at this % loss
+  max_consecutive_losses: 3    # halt for the day after N losses in a row
+  max_trades_per_day: 5
+
+# Execution guards.
+execution:
+  max_spread_price: 0.40       # XAUUSD price units (TBD: verify broker/account)
+  max_deviation_points: 30
+
+# Explicitly NOT risk-layer parameters (these belong to strategy/asset config):
+#   session hours, ATR thresholds, SL/TP multiples, time stop, timeframe.
